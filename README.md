@@ -1,4 +1,3 @@
-cat > README.md << 'EOF'
 # Bug Fixer
 
 An LLM-driven tool that reads bug reports, proposes patches, validates them
@@ -32,4 +31,3 @@ Requires:
 
 - **V1** — GitHub integration: fetch issues by URL, clone repo, open PRs.
 - **V2** — Vector retrieval for relevant files, Docker sandboxing, retry loop.
-EOF
