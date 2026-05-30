@@ -1,4 +1,4 @@
 cat > requirements.txt << 'EOF'
 openai>=1.0
 pytest>=8.0
-EOF
+EOFrequests>=2.31

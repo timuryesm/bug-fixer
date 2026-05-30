@@ -1,18 +1,33 @@
-"""V0 Bug Fixer.
+"""V1 Bug Fixer.
 
-Takes a repo path and a natural-language bug description, asks an LLM to
-propose a fix, applies it, runs pytest, and reverts if the fix didn't work.
+Inputs:
+- A natural-language bug description (--bug), OR a GitHub issue URL (--issue),
+  or both.
+- A local repo path (--repo), OR the issue's repo will be cloned automatically.
+
+Pipeline:
+1. Fetch issue (if --issue).
+2. Clone target repo (if --repo not provided).
+3. Run tests, record passing/failing sets.
+4. Ask the LLM for a patch.
+5. Reject syntactically invalid patches before any disk write.
+6. Apply patch, re-run tests.
+7. Keep the patch only if it's regression-free and made progress.
 """
-import ast
+
 import argparse
+import ast
 import os
+import re
 import shutil
 import subprocess
 import sys
-import re
 from pathlib import Path
 
 from openai import OpenAI
+
+from bug_fixer.github_client import Issue, fetch_issue
+from bug_fixer.repo_manager import clone_to_temp, cleanup
 
 
 SYSTEM_PROMPT = """You are an expert Python developer fixing bugs in a small codebase.
@@ -61,22 +76,8 @@ def build_user_prompt(bug_description: str, files: dict[str, str]) -> str:
     return "\n".join(parts)
 
 
-def call_llm(client: OpenAI, system_prompt: str, user_prompt: str) -> dict:
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        temperature=0,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-    )
-    return parse_llm_response(response.choices[0].message.content)
-
 def parse_llm_response(text: str) -> dict:
-    """Parse reasoning, file_path, new_content from the LLM response.
-
-    Tolerates whitespace and newlines (or lack thereof) between sections.
-    """
+    """Parse reasoning, file_path, new_content from the LLM response."""
     file_match = re.search(r"FILE:\s*(\S+)", text)
     if not file_match:
         raise ValueError(f"No 'FILE:' marker found in LLM response:\n{text[:500]}")
@@ -93,6 +94,27 @@ def parse_llm_response(text: str) -> dict:
         "file_path": file_match.group(1).strip(),
         "new_content": code_match.group(1).strip("\n"),
     }
+
+
+def call_llm(client: OpenAI, system_prompt: str, user_prompt: str) -> dict:
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        temperature=0,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+    )
+    return parse_llm_response(response.choices[0].message.content)
+
+
+def is_valid_python(source: str) -> tuple[bool, str]:
+    """Return (ok, error_message). Checks that source parses as Python."""
+    try:
+        ast.parse(source)
+        return True, ""
+    except SyntaxError as exc:
+        return False, f"{exc.msg} at line {exc.lineno}"
 
 
 def apply_patch(repo_path: Path, file_path: str, new_content: str) -> Path:
@@ -125,10 +147,9 @@ def last_line(text: str) -> str:
     lines = [ln for ln in text.splitlines() if ln.strip()]
     return lines[-1] if lines else "(no output)"
 
+
 def parse_test_results(output: str) -> tuple[set[str], set[str]]:
-    """Parse `pytest -v` output. Return (passing, failing) sets of test IDs
-    like 'tests/test_foo.py::test_bar'.
-    """
+    """Parse `pytest -v` output into (passing, failing) sets of test IDs."""
     passing: set[str] = set()
     failing: set[str] = set()
     for line in output.splitlines():
@@ -144,35 +165,15 @@ def parse_test_results(output: str) -> tuple[set[str], set[str]]:
             failing.add(test_id)
     return passing, failing
 
-def is_valid_python(source: str) -> tuple[bool, str]:
-    """Return (ok, error_message). Checks that source parses as Python."""
-    try:
-        ast.parse(source)
-        return True, ""
-    except SyntaxError as exc:
-        return False, f"{exc.msg} at line {exc.lineno}"
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="V0 Bug Fixer")
-    parser.add_argument("--repo", required=True, help="Path to the target repository")
-    parser.add_argument("--bug", required=True, help="Bug description (natural language)")
-    parser.add_argument(
-        "--keep-fix",
-        action="store_true",
-        help="Keep the patched file even if tests fail (for inspection)",
-    )
-    args = parser.parse_args()
-
-    repo_path = Path(args.repo).expanduser().resolve()
-    if not repo_path.is_dir():
-        sys.exit(f"Repo path not found: {repo_path}")
-
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        sys.exit("Set OPENAI_API_KEY environment variable first.")
-    client = OpenAI(api_key=api_key)
-
-    print(f"📂 Reading source files from {repo_path}/src ...")
+def run_fix(
+    client: OpenAI,
+    repo_path: Path,
+    bug_description: str,
+    keep_fix: bool,
+) -> None:
+    """Run the fix loop against a local repo."""
+    print(f"\n📂 Reading source files from {repo_path}/src ...")
     files = read_source_files(repo_path)
     if not files:
         sys.exit("No source files found under src/.")
@@ -183,7 +184,7 @@ def main() -> None:
     print(f"   {last_line(pre_output)}")
 
     print("\n🤖 Asking LLM for a fix ...")
-    user_prompt = build_user_prompt(args.bug, files)
+    user_prompt = build_user_prompt(bug_description, files)
     try:
         result = call_llm(client, SYSTEM_PROMPT, user_prompt)
     except Exception as exc:
@@ -208,7 +209,7 @@ def main() -> None:
     backup = apply_patch(repo_path, file_path, new_content)
 
     print("\n🧪 Running tests AFTER fix ...")
-    post_ok, post_output = run_tests(repo_path)
+    _, post_output = run_tests(repo_path)
     print(f"   {last_line(post_output)}")
 
     pre_pass, pre_fail = parse_test_results(pre_output)
@@ -216,13 +217,13 @@ def main() -> None:
 
     pre_all = pre_pass | pre_fail
     post_all = post_pass | post_fail
-    missing_tests = pre_all - post_all   # ran before, did not run after
+    missing_tests = pre_all - post_all
 
     newly_passing = pre_fail - post_fail
     new_failures = post_fail - pre_fail
 
     def _revert_or_keep() -> None:
-        if args.keep_fix:
+        if keep_fix:
             print(f"   Keeping patched file. Backup at {backup}.")
         else:
             print(f"   Reverting {file_path} from backup.")
@@ -256,6 +257,81 @@ def main() -> None:
                 "likely unrelated bugs.)"
             )
         backup.unlink()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="V1 Bug Fixer")
+    parser.add_argument(
+        "--repo",
+        help="Path to local target repo. If omitted, the issue's repo is cloned.",
+    )
+    parser.add_argument(
+        "--bug",
+        help="Bug description (natural language). Overrides --issue body if both given.",
+    )
+    parser.add_argument(
+        "--issue",
+        help="GitHub issue URL. The issue body becomes the bug description; "
+        "the issue's repo is cloned automatically if --repo is omitted.",
+    )
+    parser.add_argument(
+        "--keep-fix",
+        action="store_true",
+        help="Keep the patched file even if tests fail (for inspection)",
+    )
+    parser.add_argument(
+        "--keep-clone",
+        action="store_true",
+        help="Don't delete the temporary clone when done (for inspection)",
+    )
+    args = parser.parse_args()
+
+    if not args.bug and not args.issue:
+        parser.error("Provide --bug, --issue, or both.")
+
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        sys.exit("Set OPENAI_API_KEY environment variable first.")
+    github_token = os.environ.get("GITHUB_TOKEN")
+    client = OpenAI(api_key=api_key)
+
+    issue: Issue | None = None
+    if args.issue:
+        print(f"📥 Fetching issue {args.issue} ...")
+        try:
+            issue = fetch_issue(args.issue, token=github_token)
+        except Exception as exc:
+            sys.exit(f"Failed to fetch issue: {exc}")
+        print(f"   #{issue.number}: {issue.title}")
+
+    temp_clone: Path | None = None
+    if args.repo:
+        repo_path = Path(args.repo).expanduser().resolve()
+        if not repo_path.is_dir():
+            sys.exit(f"Repo path not found: {repo_path}")
+    elif issue is not None:
+        print(f"\n📦 Cloning {issue.repo_clone_url} ...")
+        try:
+            repo_path = clone_to_temp(issue.repo_clone_url)
+            temp_clone = repo_path
+        except Exception as exc:
+            sys.exit(f"Failed to clone repo: {exc}")
+        print(f"   Cloned to {repo_path}")
+    else:
+        sys.exit("Provide either --repo or --issue so I can find the target repo.")
+
+    bug_description = args.bug
+    if not bug_description and issue is not None:
+        bug_description = issue.as_bug_description()
+
+    try:
+        run_fix(client, repo_path, bug_description, args.keep_fix)
+    finally:
+        if temp_clone is not None and not args.keep_clone:
+            print(f"\n🧹 Cleaning up temp clone at {temp_clone}")
+            cleanup(temp_clone)
+        elif temp_clone is not None:
+            print(f"\n   Keeping temp clone at {temp_clone}")
 
 
 if __name__ == "__main__":
