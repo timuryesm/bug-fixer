@@ -83,3 +83,38 @@ def fetch_issue(url: str, token: str | None = None) -> Issue:
         body=data.get("body") or "",
         url=url,
     )
+
+def get_default_branch(owner: str, repo: str, token: str | None = None) -> str:
+    """Return the default branch name for a repo (e.g. 'main' or 'master')."""
+    api_url = f"https://api.github.com/repos/{owner}/{repo}"
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    response = requests.get(api_url, headers=headers, timeout=10)
+    response.raise_for_status()
+    return response.json()["default_branch"]
+
+
+def open_pull_request(
+    owner: str,
+    repo: str,
+    title: str,
+    body: str,
+    head: str,
+    base: str,
+    token: str,
+) -> dict:
+    """Open a PR and return the parsed API response (includes 'html_url')."""
+    api_url = f"https://api.github.com/repos/{owner}/{repo}/pulls"
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "Authorization": f"Bearer {token}",
+    }
+    payload = {"title": title, "body": body, "head": head, "base": base}
+    response = requests.post(api_url, json=payload, headers=headers, timeout=10)
+    response.raise_for_status()
+    return response.json()
