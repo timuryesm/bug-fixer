@@ -92,15 +92,13 @@ def build_pr_body(result: dict, issue_number: int) -> str:
     return "\n".join(lines)
 
 
-def read_source_files(repo_path: Path) -> dict[str, str]:
-    """Read all non-__init__ .py files under src/. Returns {relative_path: content}."""
+def read_source_files(repo_path: Path, source_dir: str = "src") -> dict[str, str]:
+    """Read all non-__init__ .py files under source_dir. Returns {relative_path: content}."""
     files: dict[str, str] = {}
-    src_dir = repo_path / "src"
-    if not src_dir.is_dir():
+    src_path = repo_path / source_dir
+    if not src_path.is_dir():
         return files
-    for py_file in sorted(src_dir.rglob("*.py")):
-        if py_file.name == "__init__.py":
-            continue
+    for py_file in sorted(src_path.rglob("*.py")):
         rel_path = py_file.relative_to(repo_path)
         files[str(rel_path)] = py_file.read_text()
     return files
@@ -208,12 +206,13 @@ def run_fix(
     repo_path: Path,
     bug_description: str,
     keep_fix: bool,
+    source_dir: str = "src",
 ) -> dict:
     """Run the fix loop against a local repo."""
-    print(f"\n📂 Reading source files from {repo_path}/src ...")
-    files = read_source_files(repo_path)
+    print(f"\n📂 Reading source files from {repo_path}/{source_dir} ...")
+    files = read_source_files(repo_path, source_dir)
     if not files:
-        sys.exit("No source files found under src/.")
+        sys.exit(f"No source files found under {source_dir}/.")
     print(f"   Found {len(files)} file(s): {', '.join(files.keys())}")
 
     print("\n🧪 Running tests BEFORE fix ...")
@@ -340,6 +339,11 @@ def main() -> None:
         action="store_true",
         help="On success, push the fix as a new branch and open a PR (requires --issue and GITHUB_TOKEN)",
     )
+    parser.add_argument(
+        "--source-dir",
+        default="src",
+        help="Source directory within the repo to scan for .py files (default: 'src')",
+    )
     args = parser.parse_args()
 
     if not args.bug and not args.issue:
@@ -381,7 +385,7 @@ def main() -> None:
         bug_description = issue.as_bug_description()
 
     try:
-        result = run_fix(client, repo_path, bug_description, args.keep_fix)
+        result = run_fix(client, repo_path, bug_description, args.keep_fix, args.source_dir)
 
         if args.open_pr and result["success"] and issue is not None:
             if not github_token:
