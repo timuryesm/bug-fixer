@@ -38,6 +38,14 @@ from bug_fixer.repo_manager import (
     create_branch_and_commit,
     push_branch,
 )
+from typing import Callable
+from bug_fixer.sandbox import (
+    SANDBOX_IMAGE,
+    check_docker_available,
+    image_exists,
+    build_image,
+    run_tests_in_sandbox,
+)
 
 
 SYSTEM_PROMPT = """You are an expert Python developer fixing bugs in a small codebase.
@@ -207,7 +215,10 @@ def run_fix(
     bug_description: str,
     keep_fix: bool,
     source_dir: str = "src",
+    test_runner: Callable[[Path], tuple[bool, str]] = None,
 ) -> dict:
+    if test_runner is None:
+        test_runner = run_tests
     """Run the fix loop against a local repo."""
     print(f"\n📂 Reading source files from {repo_path}/{source_dir} ...")
     files = read_source_files(repo_path, source_dir)
@@ -216,7 +227,7 @@ def run_fix(
     print(f"   Found {len(files)} file(s): {', '.join(files.keys())}")
 
     print("\n🧪 Running tests BEFORE fix ...")
-    _, pre_output = run_tests(repo_path)
+    _, pre_output = test_runner(repo_path)
     print(f"   {last_line(pre_output)}")
 
     print("\n🤖 Asking LLM for a fix ...")
@@ -245,7 +256,7 @@ def run_fix(
     backup = apply_patch(repo_path, file_path, new_content)
 
     print("\n🧪 Running tests AFTER fix ...")
-    _, post_output = run_tests(repo_path)
+    _, post_output = test_runner(repo_path)
     print(f"   {last_line(post_output)}")
 
     pre_pass, pre_fail = parse_test_results(pre_output)
@@ -344,6 +355,21 @@ def main() -> None:
         default="src",
         help="Source directory within the repo to scan for .py files (default: 'src')",
     )
+    parser.add_argument(
+        "--no-sandbox",
+        action="store_true",
+        help="Run tests on the host instead of inside the Docker sandbox. Unsafe for untrusted repos.",
+    )
+    parser.add_argument(
+        "--sandbox-image",
+        default=SANDBOX_IMAGE,
+        help=f"Docker image tag to use as the sandbox (default: {SANDBOX_IMAGE!r}).",
+    )
+    parser.add_argument(
+        "--setup-cmd",
+        default=None,
+        help="Shell command to run inside the sandbox before pytest (e.g. 'pip install -e .').",
+    )
     args = parser.parse_args()
 
     if not args.bug and not args.issue:
@@ -354,6 +380,32 @@ def main() -> None:
         sys.exit("Set OPENAI_API_KEY environment variable first.")
     github_token = os.environ.get("GITHUB_TOKEN")
     client = OpenAI(api_key=api_key)
+
+    # Pick a test runner: sandbox by default, host if --no-sandbox.
+    if args.no_sandbox:
+        print("⚠️  Running tests on host (no sandbox). Only do this with trusted repos.")
+        test_runner = run_tests
+    else:
+        ok, err = check_docker_available()
+        if not ok:
+            sys.exit(
+                f"Docker required for sandboxed runs: {err}\n"
+                "Use --no-sandbox to bypass (unsafe with untrusted repos)."
+            )
+        if not image_exists(args.sandbox_image):
+            project_root = Path(__file__).resolve().parent.parent
+            print(f"⚙️  Sandbox image '{args.sandbox_image}' not found. Building from {project_root}...")
+            try:
+                build_image(args.sandbox_image, project_root)
+            except RuntimeError as exc:
+                sys.exit(str(exc))
+            print("   Built.")
+        print(f"🐳 Tests will run inside Docker sandbox '{args.sandbox_image}'")
+        if args.setup_cmd:
+            print(f"   Pre-test setup: {args.setup_cmd}")
+
+        def test_runner(repo_path: Path) -> tuple[bool, str]:
+            return run_tests_in_sandbox(repo_path, args.sandbox_image, args.setup_cmd)
 
     issue: Issue | None = None
     if args.issue:
@@ -385,7 +437,14 @@ def main() -> None:
         bug_description = issue.as_bug_description()
 
     try:
-        result = run_fix(client, repo_path, bug_description, args.keep_fix, args.source_dir)
+        result = run_fix(
+            client,
+            repo_path,
+            bug_description,
+            args.keep_fix,
+            args.source_dir,
+            test_runner=test_runner,
+        )
 
         if args.open_pr and result["success"] and issue is not None:
             if not github_token:
