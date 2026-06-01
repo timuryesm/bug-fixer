@@ -12,6 +12,7 @@ Two pull requests autonomously generated against [buggy-calc](https://github.com
 
 - [PR #2 — Fix #1: `is_prime(1)` returns `True`](https://github.com/timuryesm/buggy-calc/pull/2)
 - [PR #4 — Fix #3: `fibonacci` off by one](https://github.com/timuryesm/buggy-calc/pull/4)
+- [PR #2 on `timuryesm/schedule`](https://github.com/timuryesm/schedule/pull/2) — one-character fix to `Job.__lt__` in a 945-line single-file Python package. Bug located by the model from a symptom-level issue description; no hint about which method to look at.
 
 Each was opened by a single command:
 
@@ -52,6 +53,8 @@ Generating an AI patch is the easy part. The hard parts are validating the patch
 Every layer of the pipeline above the LLM call was driven by a real failure I watched happen during development: a docstring serialization error, a JSON escape bug, a "successful" patch that actually broke the test runner. The validation layer is where the engineering lives.
 
 The other thing I learned is that "the model can't solve this task" and "the model can solve this task but my plumbing is broken" look identical from the outside, and confusing them costs hours. The way you tell them apart is by logging the model's reasoning trace and asking whether it was correct, then deciding which layer of the system to fix.
+
+Testing V1 against a real Python package (`schedule`, a job scheduler with several thousand GitHub stars) surfaced two assumptions baked into the initial design that didn't survive contact with real code: the hardcoded `src/` layout and the heuristic that `__init__.py` files don't contain real code. Both were small fixes once observed, but neither was findable by introspection — they only appeared once V1 hit a repo it wasn't designed for. The general lesson: a tool's robustness to real-world inputs is bounded by the variety of real-world inputs it's tested on, not by how carefully it's designed.
 
 ## Limitations / V2 roadmap
 
