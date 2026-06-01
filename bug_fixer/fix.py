@@ -26,6 +26,8 @@ from pathlib import Path
 
 from openai import OpenAI
 
+from bug_fixer.retrieval import select_relevant_files
+
 from bug_fixer.github_client import (
     Issue,
     fetch_issue,
@@ -216,6 +218,8 @@ def run_fix(
     keep_fix: bool,
     source_dir: str = "src",
     test_runner: Callable[[Path], tuple[bool, str]] = None,
+    use_retrieval: bool = True,
+    top_k: int = 5,
 ) -> dict:
     if test_runner is None:
         test_runner = run_tests
@@ -230,8 +234,21 @@ def run_fix(
     _, pre_output = test_runner(repo_path)
     print(f"   {last_line(pre_output)}")
 
+    # Retrieval: narrow the source dir to the files most likely to contain the bug.
+    if use_retrieval:
+        print(f"\n🔎 Retrieving top-{top_k} most relevant code chunks ...")
+        relevant_files, top_chunks = select_relevant_files(
+            client, files, bug_description, top_k=top_k
+        )
+        for c in top_chunks:
+            print(f"   - {c.kind} {c.name} in {c.file_path}")
+        print(f"   Sending {len(relevant_files)} of {len(files)} file(s) to LLM: "
+              f"{', '.join(relevant_files.keys())}")
+    else:
+        relevant_files = files
+
     print("\n🤖 Asking LLM for a fix ...")
-    user_prompt = build_user_prompt(bug_description, files)
+    user_prompt = build_user_prompt(bug_description, relevant_files)
     try:
         result = call_llm(client, SYSTEM_PROMPT, user_prompt)
     except Exception as exc:
@@ -370,6 +387,17 @@ def main() -> None:
         default=None,
         help="Shell command to run inside the sandbox before pytest (e.g. 'pip install -e .').",
     )
+    parser.add_argument(
+        "--no-retrieval",
+        action="store_true",
+        help="Send the entire source dir to the LLM instead of retrieving only relevant files.",
+    )
+    parser.add_argument(
+        "--top-k",
+        type=int,
+        default=5,
+        help="Number of top-ranked chunks to retrieve when retrieval is enabled (default: 5).",
+    )
     args = parser.parse_args()
 
     if not args.bug and not args.issue:
@@ -444,6 +472,8 @@ def main() -> None:
             args.keep_fix,
             args.source_dir,
             test_runner=test_runner,
+            use_retrieval=not args.no_retrieval,
+            top_k=args.top_k,
         )
 
         if args.open_pr and result["success"] and issue is not None:

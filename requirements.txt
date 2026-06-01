@@ -2,3 +2,5 @@ cat > requirements.txt << 'EOF'
 openai>=1.0
 pytest>=8.0
 EOFrequests>=2.31
+faiss-cpu>=1.7
+numpy>=1.24
