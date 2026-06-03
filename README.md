@@ -1,5 +1,7 @@
 # Bug Fixer
 
+[![CI](https://github.com/timuryesm/bug-fixer/actions/workflows/ci.yml/badge.svg)](https://github.com/timuryesm/bug-fixer/actions/workflows/ci.yml)
+
 > An LLM-driven tool that reads GitHub issues, proposes patches, validates them against the test suite, and opens pull requests — autonomously. Tests run in a Docker sandbox; relevant source files are selected via FAISS retrieval.
 
 ## What it does
